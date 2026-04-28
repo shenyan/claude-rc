@@ -53,6 +53,33 @@ stdin.on("end", async () => {
     process.exit(0);
   }
 
+  // Hijack interactive dialog tools. The user is on a phone — they have
+  // no way to drive a TUI selector. Block these at PreToolUse and tell
+  // claude to ask via the reply tool instead, then wait for the next
+  // user message. PostToolUse won't fire for blocked calls so this only
+  // needs to handle "pre".
+  const HIJACK = new Set([
+    "AskUserQuestion",
+    "ExitPlanMode",
+  ]);
+  if (KIND === "pre" && HIJACK.has(toolName)) {
+    // PreToolUse JSON blocking protocol: print to stdout with
+    // hookSpecificOutput.permissionDecision = "deny" + reason.
+    const reason =
+      `${toolName} is disabled in claude-rc (phone/web UI has no TUI selector). ` +
+      `Instead, send your question to the user via the mcp__claude-rc-channel__reply tool ` +
+      `(include all options inline, e.g. as a numbered list), then end your turn — ` +
+      `the user will answer in the next message.`;
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
+      },
+    }));
+    process.exit(0);
+  }
+
   // Connect, register, send, exit.
   let cpSock: any = null;
   try {
