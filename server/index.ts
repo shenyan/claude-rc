@@ -1,20 +1,31 @@
-// claude-rc entrypoint: serve static + WS, spawn claude per thread on demand.
-// Default port 9896 (codex-rc occupies 9876 / 9886).
+// claude-rc entrypoint: serve static + WS, dispatch to print or channel
+// session backend based on CLAUDE_RC_MODE.
+//
+// Default mode: "print"  → port 9896, claude --print stream-json
+// Channel mode: "channel" → port 9897 (with INSTANCE=ch by convention),
+//                            claude in tmux + dev-channels MCP
 
-import { Session } from "./session";
+import { Session as PrintSession } from "./session";
+import { ChannelSession } from "./channel-session";
+import { ChannelProcess } from "./claude/channel-process";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "bun";
 
-const PORT = Number(process.env.CLAUDE_RC_PORT ?? 9896);
+const MODE = (process.env.CLAUDE_RC_MODE ?? "print").toLowerCase();
+const INSTANCE = (process.env.CLAUDE_RC_INSTANCE ?? "").trim();
+const INSTANCE_SUFFIX = INSTANCE ? `-${INSTANCE.replace(/[^A-Za-z0-9_-]/g, "_")}` : "";
+
+const PORT = Number(process.env.CLAUDE_RC_PORT ?? (MODE === "channel" ? 9897 : 9896));
 const HOST = process.env.CLAUDE_RC_HOST ?? "0.0.0.0";
 const DEFAULT_CWD = process.env.CLAUDE_RC_CWD ?? process.cwd();
 const DIST_DIR = fileURLToPath(new URL("../dist/", import.meta.url));
 const TOKEN_DIR = join(homedir(), ".arche");
-const TOKEN_FILE = join(TOKEN_DIR, "claude-rc.token");
+const TOKEN_FILE = join(TOKEN_DIR, `claude-rc${INSTANCE_SUFFIX}.token`);
 
 function loadOrCreateToken(): string {
   if (!existsSync(TOKEN_DIR)) mkdirSync(TOKEN_DIR, { recursive: true });
@@ -28,7 +39,7 @@ function loadOrCreateToken(): string {
 }
 
 const TOKEN = process.env.CLAUDE_RC_TOKEN ?? loadOrCreateToken();
-const COOKIE_NAME = "claude_rc_token";
+const COOKIE_NAME = `claude_rc_token${INSTANCE_SUFFIX}`;
 
 function isAuthed(req: Request): boolean {
   const url = new URL(req.url);
@@ -42,7 +53,64 @@ function isAuthed(req: Request): boolean {
   return false;
 }
 
-const session = new Session({ defaultCwd: DEFAULT_CWD });
+// In channel mode, kill any orphan tmux sessions left over from a
+// previous bridge run. Their MCP children registered with the old
+// control plane (different port + token), so they can never reconnect
+// to us — the channel-process spawn would fail with "duplicate session"
+// and the thread would be permanently stuck.
+if (MODE === "channel") {
+  const ls = spawnSync({
+    cmd: ["tmux", "ls", "-F", "#{session_name}"],
+    stdout: "pipe", stderr: "ignore",
+  });
+  const orphans = (ls.stdout?.toString() ?? "")
+    .split("\n")
+    .filter((s) => s.startsWith("claude-rc-ch-"));
+  for (const s of orphans) {
+    spawnSync({
+      cmd: ["tmux", "kill-session", "-t", s],
+      stdout: "ignore", stderr: "ignore",
+    });
+  }
+  if (orphans.length) {
+    console.log(`[claude-rc-ch] killed ${orphans.length} orphan tmux session(s)`);
+  }
+}
+
+// In channel mode, ensure the MCP channel server is registered at user
+// scope so claude can find it. Idempotent — re-running is safe.
+if (MODE === "channel") {
+  const want = ChannelProcess.channelMcpPath();
+  const r = spawnSync({
+    cmd: ["claude", "mcp", "list"],
+    stdout: "pipe", stderr: "pipe",
+  });
+  const hasIt = (r.stdout?.toString() ?? "").includes("claude-rc-channel");
+  if (!hasIt) {
+    const add = spawnSync({
+      cmd: ["claude", "mcp", "add", "claude-rc-channel", "-s", "user",
+            "--", "bun", "run", want],
+      stdout: "pipe", stderr: "pipe",
+    });
+    if (add.exitCode === 0) {
+      console.log("[claude-rc] registered MCP server claude-rc-channel at user scope");
+    } else {
+      console.error("[claude-rc] failed to register MCP server:", add.stderr.toString());
+      process.exit(1);
+    }
+  }
+}
+
+interface SessionLike {
+  ready(): Promise<unknown>;
+  subscribe(s: (m: ServerMsg) => void): () => void;
+  snapshot(): ServerMsg;
+  handleClientMsg(msg: ClientMsg, reply: (m: ServerMsg) => void): Promise<void>;
+}
+
+const session: SessionLike = MODE === "channel"
+  ? new ChannelSession({ defaultCwd: DEFAULT_CWD })
+  : new PrintSession({ defaultCwd: DEFAULT_CWD });
 await session.ready();
 
 type WsData = { send: (m: ServerMsg) => void; unsubscribe: () => void };
@@ -99,9 +167,10 @@ const server = Bun.serve<WsData, never>({
 
 const tailscaleHost = await detectTailscaleHost();
 const url = `http://${tailscaleHost ?? "localhost"}:${PORT}/?t=${TOKEN}`;
+const label = INSTANCE ? `claude-rc[${INSTANCE}]` : "claude-rc";
 console.log("");
 console.log("┌──────────────────────────────────────────────");
-console.log("│  claude-rc listening");
+console.log(`│  ${label} listening (mode=${MODE})`);
 console.log("│  open on phone/desktop:");
 console.log("│  " + url);
 console.log("│  cwd: " + DEFAULT_CWD);

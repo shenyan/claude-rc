@@ -1,6 +1,10 @@
 import { useNavigate, useParams } from "react-router-dom";
 import { send, useStore } from "../lib/store";
 
+function tmuxName(threadId: string) {
+  return `claude-rc-ch-${threadId.slice(0, 8)}`;
+}
+
 export default function ChatList() {
   const threads = useStore((s) => s.threads);
   const connected = useStore((s) => s.connected);
@@ -33,11 +37,11 @@ export default function ChatList() {
         {threads.map((t) => {
           const active = t.id === activeId;
           return (
-            <li key={t.id}>
+            <li key={t.id} className="relative border-b border-border/60">
               <button
                 data-testid="thread-row"
                 className={
-                  "w-full text-left px-4 py-3 border-b border-border/60 active:bg-panel " +
+                  "w-full text-left px-4 py-3 pr-12 active:bg-panel " +
                   (active ? "bg-panel" : "hover:bg-panel/60")
                 }
                 onClick={() => nav(`/c/${t.id}`)}
@@ -47,6 +51,22 @@ export default function ChatList() {
                   <StatusDot status={t.status} />
                 </div>
                 <div className="text-xs text-muted truncate">{t.preview || t.cwd}</div>
+                <div className="text-[10px] text-muted/60 font-mono mt-0.5 truncate">
+                  tmux: {tmuxName(t.id)}
+                </div>
+              </button>
+              <button
+                data-testid="thread-delete"
+                title="Delete chat (kills tmux session)"
+                className="absolute top-2 right-2 text-muted hover:text-red-400 px-2 py-1 text-sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!confirm(`Delete chat "${t.title ?? "New chat"}"?\n\nThis kills tmux session ${tmuxName(t.id)} and the claude process inside it.`)) return;
+                  if (active) nav("/");
+                  send({ type: "delete_thread", threadId: t.id });
+                }}
+              >
+                ✕
               </button>
             </li>
           );
