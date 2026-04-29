@@ -28,6 +28,16 @@ function buildHookSettings(): string {
       PostToolUseFailure: [{ matcher: ".*", hooks: [{ type: "command", command: cmd("post_failure") }] }],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: cmd("user_prompt") }] }],
     },
+    // Reliability tweaks for phone/web-driven sessions where there's no
+    // way to dismiss a TUI dialog. See https://code.claude.com/docs/en/settings.
+    // - feedbackSurveyRate=0: suppress random session-feedback popups
+    // - permissions.defaultMode: belt-and-suspenders alongside --dangerously-skip-permissions
+    // - enableAllProjectMcpServers: auto-trust project .mcp.json without prompting
+    // - skipWebFetchPreflight: skip api.anthropic.com safety check on WebFetch
+    feedbackSurveyRate: 0,
+    permissions: { defaultMode: "bypassPermissions" },
+    enableAllProjectMcpServers: true,
+    skipWebFetchPreflight: true,
   });
 }
 
