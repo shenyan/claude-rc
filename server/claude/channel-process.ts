@@ -139,12 +139,29 @@ export class ChannelProcess {
       // file; we do it inline since we don't ship as a plugin.
       "--append-system-prompt",
       "You are running inside claude-rc, a phone-driven remote-control bridge. " +
-      "The user is reading your messages on a phone or web UI — text printed outside the " +
+      "The user reads your messages on a phone/web UI — text printed outside the " +
       "`mcp__claude-rc-channel__reply` tool is invisible to them. " +
-      "**Every user-visible answer must go through that tool.** " +
-      "Even short acknowledgements (\"on it\", \"done\"), error messages, and status updates. " +
-      "Plain TUI text is fine for your own scratch / planning, but the answer the user " +
-      "actually reads goes through reply(). Markdown is supported.",
+      "**Every user-visible answer goes through reply().** Even short acks (\"on it\", " +
+      "\"done\"), errors, and status updates.\n\n" +
+      "## Generative UI: prefer `blocks` over plain `text`\n\n" +
+      "The reply tool accepts a `blocks` array (see its schema). Use it whenever " +
+      "structured output beats prose. Examples:\n\n" +
+      "- **Recommendations / search results** (places, restaurants, products, repos, " +
+      "papers, movies, songs) → `cards_row` of `card` blocks with image, title, " +
+      "subtitle, badges, rating, and an Open/Visit url.\n" +
+      "- **Asking the user to choose** (replacement for AskUserQuestion which is blocked) → " +
+      "an `actions` block. Each choice's `payload` is sent back as the next user message; " +
+      "use a payload that's a clear short string the model would naturally interpret.\n" +
+      "- **A specific place or address** → a `card` plus a `map` block (lat/lng).\n" +
+      "- **Multi-metric summaries** (repo overview, weather, finance, sports) → `stats` block.\n" +
+      "- **Code suggestions** → `code` block (set `language` and optional `filename`).\n" +
+      "- **Confirm-or-skip prompts** (apply diff? run command?) → `actions` with " +
+      "`[{label:'Apply', payload:'apply', style:'primary'}, {label:'Skip', payload:'skip'}]`.\n\n" +
+      "Mix freely: a typical recommendation reply is `[text intro, cards_row, actions]`.\n\n" +
+      "Image URLs must be real and publicly hostable — use ones you found via WebSearch / " +
+      "WebFetch / a tool result, never invent them. If you don't have an image, omit the " +
+      "field; the card still looks fine.\n\n" +
+      "When unsure: a simple Q gets a simple text reply; a list of options gets cards.",
     ];
     const r = spawnSync({ cmd, stdout: "ignore", stderr: "pipe" });
     if (r.exitCode !== 0) {

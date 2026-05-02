@@ -148,27 +148,62 @@ function handleMcp(msg: any) {
       tools: [{
         name: "reply",
         description:
-          "Send a reply back to the user via the claude-rc channel. The user " +
-          "is on the phone — text outside this tool isn't surfaced. Treat " +
-          "this like the SendUserMessage / Brief tool: every user-visible " +
-          "answer goes through here. Markdown is rendered.",
+          "Send a reply to the user via the claude-rc channel. The user is on " +
+          "phone/web — text outside this tool isn't surfaced. EVERY user-visible " +
+          "answer goes through here.\n\n" +
+          "Two modes:\n" +
+          "1. Plain text: pass `text` (markdown supported).\n" +
+          "2. Generative UI: pass `blocks` — an array of typed UI blocks the web " +
+          "client renders as cards, maps, action buttons, etc. Use blocks when " +
+          "structured output beats prose: places, products, multi-choice questions, " +
+          "stats dashboards, code/diff suggestions, search-result lists.\n\n" +
+          "Block types: text, card, cards_row, map, stats, actions, code. " +
+          "See input schema for fields. Mix freely — e.g. text intro + cards_row " +
+          "+ map + actions in one reply. For a question with discrete answers, " +
+          "ALWAYS use an `actions` block (AskUserQuestion is blocked here).",
         inputSchema: {
           type: "object",
           properties: {
             text: {
               type: "string",
-              description: "The reply text. Markdown supported.",
+              description: "Markdown reply. Use this for plain prose answers.",
+            },
+            blocks: {
+              type: "array",
+              description: "Generative UI blocks rendered top-to-bottom.",
+              items: {
+                type: "object",
+                description:
+                  "One UI block. Required: `type`. Other fields depend on type:\n" +
+                  "- text: { type:'text', markdown:string }\n" +
+                  "- card: { type:'card', title, subtitle?, image?, imageAlt?, url?, rating?(0-5), badges?:string[], meta?:[{label,value}], actions?:[{label,payload?,url?,style?}] }\n" +
+                  "- cards_row: { type:'cards_row', items:card[] } — horizontal scroller\n" +
+                  "- map: { type:'map', lat:number, lng:number, zoom?(default 15), label?, caption? }\n" +
+                  "- stats: { type:'stats', items:[{label,value,delta?,tone?:'good'|'bad'|'neutral'}] }\n" +
+                  "- actions: { type:'actions', choices:[{label, payload?, style?:'primary'|'default'|'danger'}] }\n" +
+                  "- code: { type:'code', language?, code:string, filename? }",
+              },
             },
           },
-          required: ["text"],
         },
       }],
     });
   } else if (msg.method === "tools/call") {
     const params = msg.params ?? {};
     if (params.name === "reply") {
-      const text = String(params.arguments?.text ?? "");
-      cpSend({ type: "reply", text });
+      const args = params.arguments ?? {};
+      const text = typeof args.text === "string" ? args.text : "";
+      const blocks = Array.isArray(args.blocks) ? args.blocks : null;
+      // Forward blocks if present (richer rendering); else fall back to text.
+      // The bridge can also receive both (text becomes a leading text block).
+      if (blocks && blocks.length) {
+        const finalBlocks = text
+          ? [{ type: "text", markdown: text }, ...blocks]
+          : blocks;
+        cpSend({ type: "reply", blocks: finalBlocks });
+      } else {
+        cpSend({ type: "reply", text });
+      }
       mcpReply(msg.id, { content: [{ type: "text", text: "delivered" }] });
     } else {
       mcpSend({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "unknown tool: " + params.name } });

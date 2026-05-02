@@ -5,6 +5,7 @@ import type { ChatItem } from "../../../shared/protocol";
 
 const CommandTerminal = lazy(() => import("../components/CommandTerminal"));
 const MarkdownText = lazy(() => import("../components/MarkdownText"));
+const BlocksView = lazy(() => import("../components/Blocks").then((m) => ({ default: m.BlocksView })));
 
 const EMPTY_ITEMS: ChatItem[] = [];
 
@@ -57,7 +58,7 @@ export default function Chat({ threadId }: { threadId: string }) {
       </header>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4" data-testid="messages">
-        {items.map((item) => <ItemView key={item.id} item={item} />)}
+        {items.map((item) => <ItemView key={item.id} item={item} threadId={threadId} />)}
         {items.length === 0 && <div className="text-muted text-sm">No messages yet.</div>}
         {thread?.status === "active" && <TypingDots />}
       </div>
@@ -140,7 +141,7 @@ function TypingDots() {
   );
 }
 
-function ItemView({ item }: { item: ChatItem }) {
+function ItemView({ item, threadId }: { item: ChatItem; threadId: string }) {
   switch (item.kind) {
     case "user":
       return (
@@ -158,6 +159,17 @@ function ItemView({ item }: { item: ChatItem }) {
               <MarkdownText text={item.text} streaming={item.streaming} />
             </Suspense>
           </div>
+        </div>
+      );
+    case "blocks":
+      return (
+        <div data-testid="msg-blocks" className="w-full max-w-[95%]">
+          <Suspense fallback={<div className="text-muted text-xs">rendering…</div>}>
+            <BlocksView
+              blocks={item.blocks}
+              ctx={{ onAction: (payload: string) => send({ type: "send_text", threadId, text: payload }) }}
+            />
+          </Suspense>
         </div>
       );
     case "tool_use": {
