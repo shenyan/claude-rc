@@ -8,6 +8,7 @@
     "build": "vite build",
     "start": "bun server/index.ts",
     "start:ch": "CLAUDE_RC_MODE=channel CLAUDE_RC_INSTANCE=ch CLAUDE_RC_PORT=9897 bun server/index.ts",
+    "start:os": "CLAUDE_RC_MODE=oneshot CLAUDE_RC_INSTANCE=os CLAUDE_RC_PORT=9898 bun server/index.ts",
     "test:e2e": "npx playwright test"
   },
   "dependencies": {

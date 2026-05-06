@@ -21,12 +21,18 @@ const CP_PORT = Number(process.env.CLAUDE_RC_CP_PORT ?? 0);
 const CP_TOKEN = process.env.CLAUDE_RC_CP_TOKEN ?? "";
 dbg(`env THREAD_ID=${THREAD_ID} CP_PORT=${CP_PORT} TOKEN=${CP_TOKEN.slice(0,8)}...`);
 
-if (!THREAD_ID || !CP_PORT || !CP_TOKEN) {
-  process.stderr.write(
-    `[channel-mcp] missing env. need CLAUDE_RC_THREAD_ID, CLAUDE_RC_CP_PORT, CLAUDE_RC_CP_TOKEN\n` +
-    `(this MCP server is only meant to be spawned by claude-rc bridge)\n`,
-  );
-  process.exit(1);
+/**
+ * Two operating modes:
+ *   1. Channel mode (default — env vars present): connect to control plane,
+ *      forward reply blocks to bridge over TCP, accept push notifications.
+ *   2. Stub mode (env vars missing): no control plane. Just expose the
+ *      reply tool's strict schema so claude is forced to emit blocks.
+ *      The oneshot bridge harvests blocks from stream-json's tool_use
+ *      input directly — no socket needed.
+ */
+const STUB_MODE = !THREAD_ID || !CP_PORT || !CP_TOKEN;
+if (STUB_MODE) {
+  process.stderr.write(`[channel-mcp] starting in STUB mode (no control plane)\n`);
 }
 
 // ────────────────  control-plane connection  ────────────────
@@ -216,7 +222,9 @@ function handleMcp(msg: any) {
 }
 
 // ────────────────  bootstrap  ────────────────
-cpConnect().catch((err) => {
-  process.stderr.write(`[channel-mcp] could not connect to bridge ${CP_PORT}: ${err}\n`);
-  process.exit(1);
-});
+if (!STUB_MODE) {
+  cpConnect().catch((err) => {
+    process.stderr.write(`[channel-mcp] could not connect to bridge ${CP_PORT}: ${err}\n`);
+    process.exit(1);
+  });
+}
