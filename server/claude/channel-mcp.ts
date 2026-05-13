@@ -179,12 +179,10 @@ function handleMcp(msg: any) {
           "ALWAYS use an `actions` block (AskUserQuestion is blocked here).",
         inputSchema: {
           type: "object",
-          // Require at least one of text/blocks — a bare `{}` would forward
-          // an empty reply (blank bubble), which is never useful.
-          anyOf: [
-            { required: ["text"] },
-            { required: ["blocks"] },
-          ],
+          // Anthropic's tool input_schema validator rejects oneOf/allOf/anyOf
+          // at the top level (400 from /messages). The "at least one of
+          // text/blocks" rule is enforced at runtime in the tools/call
+          // handler below instead.
           properties: {
             text: {
               type: "string",
@@ -192,7 +190,6 @@ function handleMcp(msg: any) {
             },
             blocks: {
               type: "array",
-              minItems: 1,
               description: "Generative UI blocks rendered top-to-bottom.",
               items: {
                 type: "object",
@@ -217,6 +214,17 @@ function handleMcp(msg: any) {
       const args = params.arguments ?? {};
       const text = typeof args.text === "string" ? args.text : "";
       const blocks = Array.isArray(args.blocks) ? args.blocks : null;
+      // Runtime validation: at least one of text/blocks must be non-empty.
+      // (Schema-level anyOf is rejected by Anthropic's validator, so the
+      // check lives here instead — claude sees an isError tool_result and
+      // will retry properly.)
+      if (!text && !(blocks && blocks.length)) {
+        mcpReply(msg.id, {
+          content: [{ type: "text", text: "reply needs either `text` (non-empty markdown) or `blocks` (non-empty array)." }],
+          isError: true,
+        });
+        return;
+      }
       // Forward blocks if present (richer rendering); else fall back to text.
       // The bridge can also receive both (text becomes a leading text block).
       if (blocks && blocks.length) {
