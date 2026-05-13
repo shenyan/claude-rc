@@ -12,8 +12,16 @@ import { connect } from "bun";
 import { stdin, stdout } from "node:process";
 import { appendFileSync } from "node:fs";
 
+// Debug logs are opt-in: set CLAUDE_RC_DEBUG=1 to enable. Otherwise the
+// dbg() calls are no-ops. The log path is under /tmp which is world-readable
+// on multi-user systems, and we'd be writing token prefixes + bridge content
+// there — only worth the privacy cost when actively troubleshooting.
+const DEBUG_ENABLED = process.env.CLAUDE_RC_DEBUG === "1";
 const DEBUG_LOG = `/tmp/claude-rc-channel-mcp-${process.pid}.log`;
-function dbg(s: string) { try { appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${s}\n`); } catch {} }
+function dbg(s: string) {
+  if (!DEBUG_ENABLED) return;
+  try { appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${s}\n`); } catch {}
+}
 dbg(`spawn pid=${process.pid} cwd=${process.cwd()}`);
 
 const THREAD_ID = process.env.CLAUDE_RC_THREAD_ID;
@@ -38,7 +46,9 @@ if (STUB_MODE) {
 // ────────────────  control-plane connection  ────────────────
 let cpSock: Awaited<ReturnType<typeof connect>> | null = null;
 let cpBuf = "";
-const cpDec = new TextDecoder();
+// Streaming decoder — multibyte UTF-8 may span TCP chunks; without
+// { stream: true } the trailing bytes corrupt the next JSON parse.
+const cpDec = new TextDecoder("utf-8", { fatal: false });
 
 async function cpConnect() {
   dbg(`connecting to control plane at 127.0.0.1:${CP_PORT}`);
@@ -49,7 +59,7 @@ async function cpConnect() {
       socket: {
         open() { dbg("control plane: socket open"); },
         data(_: any, chunk: Uint8Array) {
-          cpBuf += cpDec.decode(chunk);
+          cpBuf += cpDec.decode(chunk, { stream: true });
           let nl: number;
           while ((nl = cpBuf.indexOf("\n")) >= 0) {
             const line = cpBuf.slice(0, nl).trim();
@@ -118,11 +128,11 @@ function sendNotification(method: string, params: any) {
 }
 
 let mcpBuf = "";
-const mcpDec = new TextDecoder();
+const mcpDec = new TextDecoder("utf-8", { fatal: false });
 
 stdin.on("data", (chunk: Buffer | string) => {
   const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-  mcpBuf += mcpDec.decode(bytes);
+  mcpBuf += mcpDec.decode(bytes, { stream: true });
   let nl: number;
   while ((nl = mcpBuf.indexOf("\n")) >= 0) {
     const line = mcpBuf.slice(0, nl).trim();

@@ -9,7 +9,7 @@
 import { spawnSync } from "bun";
 import { ControlPlane } from "../control-plane";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -46,6 +46,11 @@ export interface ChannelProcessOptions {
   cwd: string;
   controlPort: number;
   controlToken: string;
+  /**
+   * Optional suffix for the tmux session name so multiple bridge instances
+   * on the same host don't collide. Defaults to "" (bare session name).
+   */
+  instanceSuffix?: string;
   /** override: don't actually spawn (useful for tests). */
   noSpawn?: boolean;
 }
@@ -63,15 +68,27 @@ export class ChannelProcess {
   private replyHandlers: ReplyHandler[] = [];
   private readyHandlers: ReadyHandler[] = [];
   private isReady = false;
+  /** Per-thread settings dir; cleaned up on close(). */
+  private settingsDir: string | null = null;
+  /** True once tmux session is alive. */
+  private spawned = false;
+  /** Captured spawn error, if any — surfaced via lastError(). */
+  private spawnError: Error | null = null;
 
   constructor(opts: ChannelProcessOptions) {
     this.threadId = opts.threadId;
     this.cwd = opts.cwd;
     this.controlPort = opts.controlPort;
     this.controlToken = opts.controlToken;
-    this.tmuxSession = `claude-rc-ch-${opts.threadId.slice(0, 8)}`;
+    const suffix = opts.instanceSuffix ?? "";
+    this.tmuxSession = `claude-rc-ch-${opts.threadId.slice(0, 8)}${suffix}`;
     if (!opts.noSpawn) this.spawn();
   }
+
+  /** Whether spawn() succeeded. */
+  isSpawned(): boolean { return this.spawned; }
+  /** Most recent spawn failure (null if none). */
+  lastError(): Error | null { return this.spawnError; }
 
   onReply(cb: ReplyHandler) { this.replyHandlers.push(cb); }
   onReady(cb: ReadyHandler) {
@@ -98,6 +115,11 @@ export class ChannelProcess {
         stdout: "ignore", stderr: "ignore",
       });
     } catch {}
+    if (this.settingsDir) {
+      try { rmSync(this.settingsDir, { recursive: true, force: true }); }
+      catch {}
+      this.settingsDir = null;
+    }
   }
 
   // ────────────────  internals  ────────────────
@@ -110,6 +132,7 @@ export class ChannelProcess {
     // either as a path or inline JSON; a path is cleaner since the JSON
     // contains shell metachars.
     const settingsDir = mkdtempSync(join(tmpdir(), "claude-rc-ch-"));
+    this.settingsDir = settingsDir;
     const settingsPath = join(settingsDir, "hooks.json");
     writeFileSync(settingsPath, buildHookSettings(), { mode: 0o600 });
 
@@ -165,10 +188,20 @@ export class ChannelProcess {
     ];
     const r = spawnSync({ cmd, stdout: "ignore", stderr: "pipe" });
     if (r.exitCode !== 0) {
-      console.error(`[channel-process] tmux spawn failed for ${this.tmuxSession}:`,
-        r.stderr.toString());
+      const stderr = r.stderr.toString();
+      const msg = `tmux spawn failed for ${this.tmuxSession}: ${stderr.trim()}`;
+      console.error(`[channel-process] ${msg}`);
+      this.spawnError = new Error(msg);
+      // Clean up the temp settings dir we just made — caller (bridge) is
+      // expected to drop this instance after seeing isSpawned()===false.
+      if (this.settingsDir) {
+        try { rmSync(this.settingsDir, { recursive: true, force: true }); }
+        catch {}
+        this.settingsDir = null;
+      }
       return;
     }
+    this.spawned = true;
 
     // Dismiss the "WARNING: Loading development channels" dialog with
     // Enter. We send the keystroke a couple of times spaced out — the
