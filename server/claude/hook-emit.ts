@@ -20,8 +20,15 @@ const KIND = process.argv[2] ?? "pre";
 const THREAD_ID = process.env.CLAUDE_RC_THREAD_ID;
 const CP_PORT = Number(process.env.CLAUDE_RC_CP_PORT ?? 0);
 const CP_TOKEN = process.env.CLAUDE_RC_CP_TOKEN ?? "";
+// Debug logs are opt-in (CLAUDE_RC_DEBUG=1). Without the env flag we don't
+// touch /tmp at all — payloads may contain user prompts/tool inputs, and
+// /tmp is typically world-readable on multi-user systems.
+const DEBUG_ENABLED = process.env.CLAUDE_RC_DEBUG === "1";
 const DBG = `/tmp/claude-rc-hook-${process.pid}.log`;
-function dbg(s: string) { try { appendFileSync(DBG, `[${new Date().toISOString()}] ${s}\n`); } catch {} }
+function dbg(s: string) {
+  if (!DEBUG_ENABLED) return;
+  try { appendFileSync(DBG, `[${new Date().toISOString()}] ${s}\n`); } catch {}
+}
 
 if (!THREAD_ID || !CP_PORT || !CP_TOKEN) {
   // Hook fired outside claude-rc context — silently no-op so we don't
@@ -115,6 +122,10 @@ stdin.on("end", async () => {
       type: "tool_call",
       tool: String(evt.tool_name ?? "?"),
       input: evt.tool_input ?? {},
+      // Include tool_use_id so the bridge can correlate this call with its
+      // matching post hook by id (not name). Necessary when multiple calls
+      // of the same tool overlap or arrive out of order.
+      tool_use_id: String(evt.tool_use_id ?? ""),
     });
   } else if (KIND === "user_prompt") {
     const text = String(evt.prompt ?? "");

@@ -3,10 +3,12 @@
 // Per-thread lifecycle:
 //   1. createThread        — assigns id, persisted to threads.json
 //   2. sendText             — if no ChannelProcess, spawn one (tmux + claude
-//                             with --dangerously-load-development-channels);
-//                             when MCP child registers via control plane,
-//                             we mark the thread ready, then push the user
-//                             text as notifications/claude/channel
+//                             with --dangerously-load-development-channels).
+//                             User text is buffered as pendingPush until the
+//                             MCP child registers on the control plane; then
+//                             we inject it into the tmux session via
+//                             send-keys (NOT via notifications/claude/channel
+//                             — the welcome/setup screens drop pushes).
 //   3. claude calls reply  — control plane forwards; we append agent item
 
 import { ChannelProcess } from "./claude/channel-process";
@@ -71,7 +73,8 @@ function hydrateFromTranscript(sessionId: string, cwd: string): ChatItem[] {
     if (!line) continue;
     let evt: any;
     try { evt = JSON.parse(line); } catch { continue; }
-    const ts = evt.timestamp ? Date.parse(evt.timestamp) : Date.now();
+    const parsedTs = evt.timestamp ? Date.parse(evt.timestamp) : Date.now();
+    const ts = Number.isFinite(parsedTs) ? parsedTs : Date.now();
 
     if (evt.type === "user") {
       const content = evt.message?.content;
@@ -145,11 +148,13 @@ export class ChannelSession {
   private threads = new Map<string, ThreadState>();
   private subscribers = new Set<Subscriber>();
   readonly defaultCwd: string;
+  readonly instanceSuffix: string;
   private cp: ControlPlane;
   private cpPort = 0;
 
-  constructor(opts: { defaultCwd: string }) {
+  constructor(opts: { defaultCwd: string; instanceSuffix?: string }) {
     this.defaultCwd = opts.defaultCwd;
+    this.instanceSuffix = opts.instanceSuffix ?? "";
     this.cp = new ControlPlane({
       authToken: ControlPlane.randomToken(),
       onMessage: (threadId, msg) => this.handleChildMsg(threadId, msg),
@@ -295,7 +300,17 @@ export class ChannelSession {
         cwd: t.summary.cwd,
         controlPort: this.cpPort,
         controlToken: this.cp.token,
+        instanceSuffix: this.instanceSuffix,
       });
+      // Surface spawn failure: mark thread errored and drop the proc so
+      // the next send_text retries from scratch (otherwise we'd hold a
+      // dead handle and silently fail every subsequent message).
+      if (!proc.isSpawned()) {
+        const err = proc.lastError()?.message ?? "tmux spawn failed";
+        this.updateSummary(t, { status: "errored", lastActiveAt: Date.now() });
+        reply({ type: "error", message: `claude couldn't start: ${err}` });
+        return;
+      }
       t.proc = proc;
       t.pendingPush = text;
       return;
@@ -334,9 +349,13 @@ export class ChannelSession {
         break;
       }
       case "tool_call": {
+        // Use the hook's tool_use_id as the ChatItem id so tool_result can
+        // correlate by id (not by tool name, which collides for concurrent
+        // calls of the same tool). Fall back to a UUID if the hook didn't
+        // send one (older payloads).
         const item: ChatItem = {
           kind: "tool_use",
-          id: randomUUID(),
+          id: String(msg.tool_use_id ?? randomUUID()),
           tool: String(msg.tool ?? "?"),
           input: msg.input ?? {},
           createdAt: Date.now(),
@@ -347,13 +366,29 @@ export class ChannelSession {
         break;
       }
       case "tool_result": {
-        // Mark the most recent matching running tool_use as completed.
-        for (let i = t.items.length - 1; i >= 0; i--) {
-          const it = t.items[i];
-          if (it.kind === "tool_use" && it.status === "running" && (!msg.tool || it.tool === msg.tool)) {
-            it.status = msg.is_error ? "errored" : "completed";
-            this.broadcast({ type: "item_updated", threadId: t.summary.id, item: it });
-            break;
+        // Match the corresponding tool_use by id (preferred) — only fall
+        // back to name-matching when the id is missing.
+        const tuid = String(msg.tool_use_id ?? "");
+        let matched = false;
+        if (tuid) {
+          for (let i = t.items.length - 1; i >= 0; i--) {
+            const it = t.items[i];
+            if (it.kind === "tool_use" && it.id === tuid) {
+              it.status = msg.is_error ? "errored" : "completed";
+              this.broadcast({ type: "item_updated", threadId: t.summary.id, item: it });
+              matched = true;
+              break;
+            }
+          }
+        }
+        if (!matched) {
+          for (let i = t.items.length - 1; i >= 0; i--) {
+            const it = t.items[i];
+            if (it.kind === "tool_use" && it.status === "running" && (!msg.tool || it.tool === msg.tool)) {
+              it.status = msg.is_error ? "errored" : "completed";
+              this.broadcast({ type: "item_updated", threadId: t.summary.id, item: it });
+              break;
+            }
           }
         }
         const out = String(msg.output ?? "");

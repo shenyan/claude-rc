@@ -57,6 +57,7 @@ export default function ChatList() {
               </button>
               <button
                 data-testid="thread-delete"
+                aria-label={`Delete chat "${t.title ?? "New chat"}" (kills tmux session)`}
                 title="Delete chat (kills tmux session)"
                 className="absolute top-2 right-2 text-muted hover:text-red-400 px-2 py-1 text-sm"
                 onClick={(e) => {

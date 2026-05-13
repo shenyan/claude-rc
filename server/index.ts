@@ -55,9 +55,10 @@ function isAuthed(req: Request): boolean {
 
 // In channel mode, kill any orphan tmux sessions left over from a
 // previous bridge run. Their MCP children registered with the old
-// control plane (different port + token), so they can never reconnect
-// to us — the channel-process spawn would fail with "duplicate session"
-// and the thread would be permanently stuck.
+// control plane (different port + token), so they can never reconnect.
+// Scope by INSTANCE so two channel bridges on the same host don't kill
+// each other's sessions. ChannelProcess constructs the tmux name as
+// `claude-rc-ch-${threadId.slice(0,8)}${INSTANCE_SUFFIX}`.
 if (MODE === "channel") {
   const ls = spawnSync({
     cmd: ["tmux", "ls", "-F", "#{session_name}"],
@@ -65,7 +66,7 @@ if (MODE === "channel") {
   });
   const orphans = (ls.stdout?.toString() ?? "")
     .split("\n")
-    .filter((s) => s.startsWith("claude-rc-ch-"));
+    .filter((s) => s.startsWith("claude-rc-ch-") && (INSTANCE_SUFFIX ? s.endsWith(INSTANCE_SUFFIX) : !/-[A-Za-z0-9_]+$/.test(s.slice("claude-rc-ch-".length + 8))));
   for (const s of orphans) {
     spawnSync({
       cmd: ["tmux", "kill-session", "-t", s],
@@ -73,7 +74,7 @@ if (MODE === "channel") {
     });
   }
   if (orphans.length) {
-    console.log(`[claude-rc-ch] killed ${orphans.length} orphan tmux session(s)`);
+    console.log(`[claude-rc-ch] killed ${orphans.length} orphan tmux session(s) (instance=${INSTANCE || "<default>"})`);
   }
 }
 
@@ -109,7 +110,7 @@ interface SessionLike {
 }
 
 const session: SessionLike = MODE === "channel"
-  ? new ChannelSession({ defaultCwd: DEFAULT_CWD })
+  ? new ChannelSession({ defaultCwd: DEFAULT_CWD, instanceSuffix: INSTANCE_SUFFIX })
   : new PrintSession({ defaultCwd: DEFAULT_CWD });
 await session.ready();
 

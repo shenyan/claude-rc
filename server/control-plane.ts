@@ -15,7 +15,9 @@ import { randomBytes } from "node:crypto";
 export type ChildToBridgeMsg =
   | { type: "register"; threadId: string; token: string }
   | { type: "reply"; text: string }
-  | { type: "tool_call"; tool: string; input: any }      // optional: surface internal tools
+  | { type: "tool_call"; tool: string; input: any; tool_use_id?: string }
+  | { type: "tool_result"; tool?: string; tool_use_id: string; output: string; is_error?: boolean }
+  | { type: "user_prompt"; text: string }
   | { type: "log"; level: "info" | "warn" | "error"; msg: string };
 
 export type BridgeToChildMsg =
@@ -48,7 +50,6 @@ export class ControlPlane {
   }
 
   async start(): Promise<number> {
-    const dec = new TextDecoder();
     const self = this;
 
     this.server = (Bun.listen as any)({
@@ -56,11 +57,14 @@ export class ControlPlane {
       port: this.opts.port ?? 0,
       socket: {
         open(sock: any) {
-          sock.data = { buf: "", threadId: null };
+          // Use a per-socket streaming decoder so multibyte UTF-8 split
+          // across TCP chunks doesn't corrupt JSON. Each socket needs its
+          // own decoder because stream state is per-stream.
+          sock.data = { buf: "", threadId: null, handle: null, dec: new TextDecoder("utf-8", { fatal: false }) };
         },
         data(sock: any, chunk: Uint8Array) {
           const data = sock.data;
-          data.buf += dec.decode(chunk);
+          data.buf += data.dec.decode(chunk, { stream: true });
           let nl: number;
           while ((nl = data.buf.indexOf("\n")) >= 0) {
             const line = data.buf.slice(0, nl).trim();
@@ -73,13 +77,21 @@ export class ControlPlane {
                 sock.end();
                 return;
               }
-              data.threadId = m.threadId;
-              self.children.set(m.threadId, {
+              // If another socket previously registered the same threadId,
+              // close it so its `close` handler can't later delete our
+              // newer entry (and vice-versa: tie `delete` to our handle).
+              const prior = self.children.get(m.threadId);
+              if (prior && (prior as any).sock !== sock) {
+                try { (prior as any).sock?.end(); } catch {}
+              }
+              const handle: ChildHandle = {
                 threadId: m.threadId,
-                send: (msg) => {
-                  try { sock.write(JSON.stringify(msg) + "\n"); } catch {}
-                },
-              });
+                send: (msg) => { try { sock.write(JSON.stringify(msg) + "\n"); } catch {} },
+              };
+              (handle as any).sock = sock;
+              data.handle = handle;
+              data.threadId = m.threadId;
+              self.children.set(m.threadId, handle);
               self.opts.onConnect?.(m.threadId);
               continue;
             }
@@ -91,8 +103,13 @@ export class ControlPlane {
         close(sock: any) {
           const data = sock.data;
           if (data?.threadId) {
-            self.children.delete(data.threadId);
-            self.opts.onDisconnect?.(data.threadId);
+            // Only remove if the currently-registered handle is ours.
+            // Otherwise a duplicate register replaced us already.
+            const cur = self.children.get(data.threadId);
+            if (cur === data.handle) {
+              self.children.delete(data.threadId);
+              self.opts.onDisconnect?.(data.threadId);
+            }
           }
         },
         error(_: any, err: Error) {
