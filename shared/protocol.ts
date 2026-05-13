@@ -72,7 +72,7 @@ export type Block =
       type: "actions";
       choices: { label: string; payload?: string; style?: "primary" | "default" | "danger" }[];
     }
-  /** Code/diff snippet, syntax-highlighted. */
+  /** Fenced code snippet rendered in a monospace block (no highlighting yet). */
   | { type: "code"; language?: string; code: string; filename?: string };
 
 export type ChatItem =

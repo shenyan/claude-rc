@@ -179,6 +179,12 @@ function handleMcp(msg: any) {
           "ALWAYS use an `actions` block (AskUserQuestion is blocked here).",
         inputSchema: {
           type: "object",
+          // Require at least one of text/blocks — a bare `{}` would forward
+          // an empty reply (blank bubble), which is never useful.
+          anyOf: [
+            { required: ["text"] },
+            { required: ["blocks"] },
+          ],
           properties: {
             text: {
               type: "string",
@@ -186,6 +192,7 @@ function handleMcp(msg: any) {
             },
             blocks: {
               type: "array",
+              minItems: 1,
               description: "Generative UI blocks rendered top-to-bottom.",
               items: {
                 type: "object",

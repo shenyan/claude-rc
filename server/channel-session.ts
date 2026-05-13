@@ -142,6 +142,14 @@ function previewFromReply(msg: any): string {
       if (b?.type === "card" && typeof b.title === "string") return b.title.slice(0, 80);
       if (b?.type === "cards_row" && Array.isArray(b.items) && b.items[0]?.title) return String(b.items[0].title).slice(0, 80);
       if (b?.type === "actions") return "(choose an option)";
+      // Sensible fallbacks for blocks that don't carry obvious prose —
+      // otherwise threads in the list look blank.
+      if (b?.type === "code") return b.filename ? `(code: ${b.filename})` : "(code)";
+      if (b?.type === "map") return b.label ? `(map: ${b.label})` : "(map)";
+      if (b?.type === "stats" && Array.isArray(b.items) && b.items[0]) {
+        const s = b.items[0];
+        return `${s.label ?? ""}: ${s.value ?? ""}`.slice(0, 80) || "(stats)";
+      }
     }
   }
   return "";
@@ -362,7 +370,10 @@ export class ChannelSession {
           : { kind: "agent", id: randomUUID(), text: String(msg.text ?? ""), createdAt: Date.now(), streaming: false };
         t.items.push(item);
         this.broadcast({ type: "item_appended", threadId: t.summary.id, item });
-        const preview = previewFromReply(msg);
+        // If the reply yields no usable preview (rare edge case), keep
+        // the prior preview rather than blanking the row in the list.
+        const derived = previewFromReply(msg);
+        const preview = derived || t.summary.preview;
         this.updateSummary(t, {
           status: "idle",
           lastActiveAt: Date.now(),

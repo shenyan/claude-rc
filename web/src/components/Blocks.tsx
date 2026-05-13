@@ -97,11 +97,18 @@ function CardView({ card, ctx }: { card: Extract<Block, { type: "card" }>; ctx: 
     <div className="bg-panel border border-border rounded-xl overflow-hidden">
       {card.image && (
         <Wrapper {...wrapperProps} className="block aspect-[16/9] bg-bg overflow-hidden">
+          {/* Privacy note: direct <img src> reveals client IP / User-Agent to
+              the host. MarkdownText proxies remote images; here we accept the
+              tradeoff because cards are user-requested (claude was asked to
+              search/recommend) and a server-side image proxy would need its
+              own auth + caching layer. Switch to a proxy if any block lands
+              in a context where the user didn't opt in. */}
           <img
             src={card.image}
             alt={card.imageAlt ?? card.title}
             className="w-full h-full object-cover"
             loading="lazy"
+            referrerPolicy="no-referrer"
             onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
           />
         </Wrapper>
@@ -171,6 +178,11 @@ function CardView({ card, ctx }: { card: Extract<Block, { type: "card" }>; ctx: 
   );
 }
 
+function clampNum(v: unknown, min: number, max: number): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.max(min, Math.min(max, v));
+}
+
 function Stars({ rating }: { rating: number }) {
   const r = Math.max(0, Math.min(5, rating));
   return (
@@ -182,21 +194,33 @@ function Stars({ rating }: { rating: number }) {
 
 function MapView({ block }: { block: Extract<Block, { type: "map" }> }) {
   const [expanded, setExpanded] = useState(false);
-  const zoom = block.zoom ?? 15;
+  // Validate model-supplied coords/zoom. lat/lng out of range or NaN → don't
+  // render the iframe (would produce an absurd bbox / broken embed URL).
+  const lat = clampNum(block.lat, -90, 90);
+  const lng = clampNum(block.lng, -180, 180);
+  if (lat === null || lng === null) {
+    return <div className="text-xs text-muted">(invalid map coordinates)</div>;
+  }
+  const zoom = clampNum(block.zoom ?? 15, 1, 19) ?? 15;
   // OSM bbox: rough degree window proportional to zoom (~0.005° at z15).
   const span = Math.max(0.0008, 360 / Math.pow(2, zoom + 1));
-  const w = block.lng - span, e = block.lng + span;
-  const s = block.lat - span * 0.6, n = block.lat + span * 0.6;
-  const embed = `https://www.openstreetmap.org/export/embed.html?bbox=${w},${s},${e},${n}&layer=mapnik&marker=${block.lat},${block.lng}`;
-  const full = `https://www.openstreetmap.org/?mlat=${block.lat}&mlon=${block.lng}#map=${zoom}/${block.lat}/${block.lng}`;
+  const w = lng - span, e = lng + span;
+  const s = lat - span * 0.6, n = lat + span * 0.6;
+  const embed = `https://www.openstreetmap.org/export/embed.html?bbox=${w},${s},${e},${n}&layer=mapnik&marker=${lat},${lng}`;
+  const full = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=${zoom}/${lat}/${lng}`;
   return (
     <div className="bg-panel border border-border rounded-xl overflow-hidden">
       <div className={"relative bg-bg " + (expanded ? "h-72" : "h-40")}>
+        {/* sandbox limits what the embedded OSM page can do in our origin;
+            no-referrer suppresses our URL (which contains the token) from
+            being sent in Referer to openstreetmap.org. */}
         <iframe
           src={embed}
           className="w-full h-full"
           title={block.label ?? "map"}
           loading="lazy"
+          referrerPolicy="no-referrer"
+          sandbox="allow-scripts allow-same-origin allow-popups"
         />
         <button
           className="absolute top-2 right-2 text-[11px] bg-panel/90 border border-border rounded px-2 py-0.5"
