@@ -7,6 +7,7 @@
 
 import { Session as PrintSession } from "./session";
 import { ChannelSession } from "./channel-session";
+import { OneshotSession } from "./oneshot-session";
 import { ChannelProcess } from "./claude/channel-process";
 import type { ClientMsg, ServerMsg } from "../shared/protocol";
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -20,7 +21,11 @@ const MODE = (process.env.CLAUDE_RC_MODE ?? "print").toLowerCase();
 const INSTANCE = (process.env.CLAUDE_RC_INSTANCE ?? "").trim();
 const INSTANCE_SUFFIX = INSTANCE ? `-${INSTANCE.replace(/[^A-Za-z0-9_-]/g, "_")}` : "";
 
-const PORT = Number(process.env.CLAUDE_RC_PORT ?? (MODE === "channel" ? 9897 : 9896));
+const PORT = Number(process.env.CLAUDE_RC_PORT ?? (
+  MODE === "channel" ? 9897 :
+  MODE === "oneshot" ? 9898 :
+  9896
+));
 const HOST = process.env.CLAUDE_RC_HOST ?? "0.0.0.0";
 const DEFAULT_CWD = process.env.CLAUDE_RC_CWD ?? process.cwd();
 const DIST_DIR = fileURLToPath(new URL("../dist/", import.meta.url));
@@ -111,6 +116,8 @@ interface SessionLike {
 
 const session: SessionLike = MODE === "channel"
   ? new ChannelSession({ defaultCwd: DEFAULT_CWD, instanceSuffix: INSTANCE_SUFFIX })
+  : MODE === "oneshot"
+  ? new OneshotSession({ defaultCwd: DEFAULT_CWD })
   : new PrintSession({ defaultCwd: DEFAULT_CWD });
 await session.ready();
 

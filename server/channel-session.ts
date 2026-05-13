@@ -14,6 +14,7 @@
 import { ChannelProcess } from "./claude/channel-process";
 import { ControlPlane, type ChildToBridgeMsg } from "./control-plane";
 import type {
+  Block,
   ChatItem,
   ClientMsg,
   ServerMsg,
@@ -104,8 +105,16 @@ function hydrateFromTranscript(sessionId: string, cwd: string): ChatItem[] {
         const name = String(b.name ?? "");
         const tuid = String(b.id ?? "");
         if (name === "mcp__claude-rc-channel__reply") {
-          const text = String(b.input?.text ?? "");
-          if (text) items.push({ kind: "agent", id: b.id ?? randomUUID(), text, createdAt: ts });
+          const text = typeof b.input?.text === "string" ? b.input.text : "";
+          const blocks = Array.isArray(b.input?.blocks) ? (b.input.blocks as Block[]) : null;
+          if (blocks && blocks.length) {
+            const finalBlocks: Block[] = text
+              ? [{ type: "text", markdown: text }, ...blocks]
+              : blocks;
+            items.push({ kind: "blocks", id: b.id ?? randomUUID(), blocks: finalBlocks, createdAt: ts });
+          } else if (text) {
+            items.push({ kind: "agent", id: b.id ?? randomUUID(), text, createdAt: ts });
+          }
           if (tuid) suppressResultIds.add(tuid); // hide reply's "delivered" ack
         } else if (NOISE_TOOLS.has(name) || isOwnPlumbing(name)) {
           if (tuid) suppressResultIds.add(tuid);
@@ -123,6 +132,27 @@ function hydrateFromTranscript(sessionId: string, cwd: string): ChatItem[] {
     }
   }
   return items;
+}
+
+function previewFromReply(msg: any): string {
+  if (typeof msg?.text === "string" && msg.text) return msg.text.slice(0, 80);
+  if (Array.isArray(msg?.blocks)) {
+    for (const b of msg.blocks) {
+      if (b?.type === "text" && typeof b.markdown === "string") return b.markdown.slice(0, 80);
+      if (b?.type === "card" && typeof b.title === "string") return b.title.slice(0, 80);
+      if (b?.type === "cards_row" && Array.isArray(b.items) && b.items[0]?.title) return String(b.items[0].title).slice(0, 80);
+      if (b?.type === "actions") return "(choose an option)";
+      // Sensible fallbacks for blocks that don't carry obvious prose —
+      // otherwise threads in the list look blank.
+      if (b?.type === "code") return b.filename ? `(code: ${b.filename})` : "(code)";
+      if (b?.type === "map") return b.label ? `(map: ${b.label})` : "(map)";
+      if (b?.type === "stats" && Array.isArray(b.items) && b.items[0]) {
+        const s = b.items[0];
+        return `${s.label ?? ""}: ${s.value ?? ""}`.slice(0, 80) || "(stats)";
+      }
+    }
+  }
+  return "";
 }
 
 function stringifyToolResultContent(c: unknown): string {
@@ -332,19 +362,22 @@ export class ChannelSession {
     if (!t) return;
     switch (msg.type) {
       case "reply": {
-        const item: ChatItem = {
-          kind: "agent",
-          id: randomUUID(),
-          text: msg.text,
-          createdAt: Date.now(),
-          streaming: false,
-        };
+        // Two flavors: plain text, or structured blocks. Build the
+        // matching ChatItem and a textual preview either way.
+        const blocks = Array.isArray(msg.blocks) ? msg.blocks : null;
+        const item: ChatItem = blocks
+          ? { kind: "blocks", id: randomUUID(), blocks, createdAt: Date.now() }
+          : { kind: "agent", id: randomUUID(), text: String(msg.text ?? ""), createdAt: Date.now(), streaming: false };
         t.items.push(item);
         this.broadcast({ type: "item_appended", threadId: t.summary.id, item });
+        // If the reply yields no usable preview (rare edge case), keep
+        // the prior preview rather than blanking the row in the list.
+        const derived = previewFromReply(msg);
+        const preview = derived || t.summary.preview;
         this.updateSummary(t, {
           status: "idle",
           lastActiveAt: Date.now(),
-          preview: msg.text.slice(0, 80),
+          preview,
         });
         break;
       }

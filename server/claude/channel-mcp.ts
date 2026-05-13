@@ -29,12 +29,18 @@ const CP_PORT = Number(process.env.CLAUDE_RC_CP_PORT ?? 0);
 const CP_TOKEN = process.env.CLAUDE_RC_CP_TOKEN ?? "";
 dbg(`env THREAD_ID=${THREAD_ID} CP_PORT=${CP_PORT} TOKEN=${CP_TOKEN.slice(0,8)}...`);
 
-if (!THREAD_ID || !CP_PORT || !CP_TOKEN) {
-  process.stderr.write(
-    `[channel-mcp] missing env. need CLAUDE_RC_THREAD_ID, CLAUDE_RC_CP_PORT, CLAUDE_RC_CP_TOKEN\n` +
-    `(this MCP server is only meant to be spawned by claude-rc bridge)\n`,
-  );
-  process.exit(1);
+/**
+ * Two operating modes:
+ *   1. Channel mode (default — env vars present): connect to control plane,
+ *      forward reply blocks to bridge over TCP, accept push notifications.
+ *   2. Stub mode (env vars missing): no control plane. Just expose the
+ *      reply tool's strict schema so claude is forced to emit blocks.
+ *      The oneshot bridge harvests blocks from stream-json's tool_use
+ *      input directly — no socket needed.
+ */
+const STUB_MODE = !THREAD_ID || !CP_PORT || !CP_TOKEN;
+if (STUB_MODE) {
+  process.stderr.write(`[channel-mcp] starting in STUB mode (no control plane)\n`);
 }
 
 // ────────────────  control-plane connection  ────────────────
@@ -158,27 +164,69 @@ function handleMcp(msg: any) {
       tools: [{
         name: "reply",
         description:
-          "Send a reply back to the user via the claude-rc channel. The user " +
-          "is on the phone — text outside this tool isn't surfaced. Treat " +
-          "this like the SendUserMessage / Brief tool: every user-visible " +
-          "answer goes through here. Markdown is rendered.",
+          "Send a reply to the user via the claude-rc channel. The user is on " +
+          "phone/web — text outside this tool isn't surfaced. EVERY user-visible " +
+          "answer goes through here.\n\n" +
+          "Two modes:\n" +
+          "1. Plain text: pass `text` (markdown supported).\n" +
+          "2. Generative UI: pass `blocks` — an array of typed UI blocks the web " +
+          "client renders as cards, maps, action buttons, etc. Use blocks when " +
+          "structured output beats prose: places, products, multi-choice questions, " +
+          "stats dashboards, code/diff suggestions, search-result lists.\n\n" +
+          "Block types: text, card, cards_row, map, stats, actions, code. " +
+          "See input schema for fields. Mix freely — e.g. text intro + cards_row " +
+          "+ map + actions in one reply. For a question with discrete answers, " +
+          "ALWAYS use an `actions` block (AskUserQuestion is blocked here).",
         inputSchema: {
           type: "object",
+          // Require at least one of text/blocks — a bare `{}` would forward
+          // an empty reply (blank bubble), which is never useful.
+          anyOf: [
+            { required: ["text"] },
+            { required: ["blocks"] },
+          ],
           properties: {
             text: {
               type: "string",
-              description: "The reply text. Markdown supported.",
+              description: "Markdown reply. Use this for plain prose answers.",
+            },
+            blocks: {
+              type: "array",
+              minItems: 1,
+              description: "Generative UI blocks rendered top-to-bottom.",
+              items: {
+                type: "object",
+                description:
+                  "One UI block. Required: `type`. Other fields depend on type:\n" +
+                  "- text: { type:'text', markdown:string }\n" +
+                  "- card: { type:'card', title, subtitle?, image?, imageAlt?, url?, rating?(0-5), badges?:string[], meta?:[{label,value}], actions?:[{label,payload?,url?,style?}] }\n" +
+                  "- cards_row: { type:'cards_row', items:card[] } — horizontal scroller\n" +
+                  "- map: { type:'map', lat:number, lng:number, zoom?(default 15), label?, caption? }\n" +
+                  "- stats: { type:'stats', items:[{label,value,delta?,tone?:'good'|'bad'|'neutral'}] }\n" +
+                  "- actions: { type:'actions', choices:[{label, payload?, style?:'primary'|'default'|'danger'}] }\n" +
+                  "- code: { type:'code', language?, code:string, filename? }",
+              },
             },
           },
-          required: ["text"],
         },
       }],
     });
   } else if (msg.method === "tools/call") {
     const params = msg.params ?? {};
     if (params.name === "reply") {
-      const text = String(params.arguments?.text ?? "");
-      cpSend({ type: "reply", text });
+      const args = params.arguments ?? {};
+      const text = typeof args.text === "string" ? args.text : "";
+      const blocks = Array.isArray(args.blocks) ? args.blocks : null;
+      // Forward blocks if present (richer rendering); else fall back to text.
+      // The bridge can also receive both (text becomes a leading text block).
+      if (blocks && blocks.length) {
+        const finalBlocks = text
+          ? [{ type: "text", markdown: text }, ...blocks]
+          : blocks;
+        cpSend({ type: "reply", blocks: finalBlocks });
+      } else {
+        cpSend({ type: "reply", text });
+      }
       mcpReply(msg.id, { content: [{ type: "text", text: "delivered" }] });
     } else {
       mcpSend({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "unknown tool: " + params.name } });
@@ -191,7 +239,9 @@ function handleMcp(msg: any) {
 }
 
 // ────────────────  bootstrap  ────────────────
-cpConnect().catch((err) => {
-  process.stderr.write(`[channel-mcp] could not connect to bridge ${CP_PORT}: ${err}\n`);
-  process.exit(1);
-});
+if (!STUB_MODE) {
+  cpConnect().catch((err) => {
+    process.stderr.write(`[channel-mcp] could not connect to bridge ${CP_PORT}: ${err}\n`);
+    process.exit(1);
+  });
+}

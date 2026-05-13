@@ -14,7 +14,11 @@ import { randomBytes } from "node:crypto";
 
 export type ChildToBridgeMsg =
   | { type: "register"; threadId: string; token: string }
-  | { type: "reply"; text: string }
+  // `reply` may carry plain text, structured blocks, or both. The bridge
+  // builds an `agent` or `blocks` ChatItem depending on which is set. Block
+  // typing stays loose here so control-plane.ts has no shared/protocol.ts
+  // import (it's reused by oneshot/stub paths too).
+  | { type: "reply"; text?: string; blocks?: unknown[] }
   | { type: "tool_call"; tool: string; input: any; tool_use_id?: string }
   | { type: "tool_result"; tool?: string; tool_use_id: string; output: string; is_error?: boolean }
   | { type: "user_prompt"; text: string }
