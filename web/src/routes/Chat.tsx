@@ -42,6 +42,9 @@ export default function Chat({ threadId }: { threadId: string }) {
         <div className="min-w-0 flex-1">
           <div className="font-semibold truncate">{thread?.title ?? "New chat"}</div>
           <div className="text-xs text-muted truncate">{thread?.cwd}</div>
+          <div className="text-[10px] text-muted/60 font-mono truncate">
+            tmux: claude-rc-ch-{threadId.slice(0, 8)}  ·  tmux attach -t claude-rc-ch-{threadId.slice(0, 8)}
+          </div>
         </div>
         {thread?.status === "active" && (
           <button
@@ -83,6 +86,44 @@ export default function Chat({ threadId }: { threadId: string }) {
           Send
         </button>
       </form>
+    </div>
+  );
+}
+
+// Compact tool_result: by default show only first ~6 lines / 400 chars
+// of plain text. Click to expand into a full xterm view (lazy-loaded).
+function ToolResultView({ item }: { item: Extract<ChatItem, { kind: "tool_result" }> }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!item.output) {
+    return (
+      <div className="font-mono text-xs text-muted [overflow-wrap:anywhere]" data-testid="msg-tool-result">
+        (no output){item.isError && <span className="text-red-400 ml-2">· error</span>}
+      </div>
+    );
+  }
+  const lines = item.output.split("\n");
+  const truncated = lines.length > 6 || item.output.length > 400;
+  if (!expanded && truncated) {
+    const preview = lines.slice(0, 6).join("\n").slice(0, 400);
+    return (
+      <div className="font-mono text-xs" data-testid="msg-tool-result">
+        <pre className="text-zinc-400 whitespace-pre-wrap [overflow-wrap:anywhere] p-2 bg-bg border border-border rounded">{preview}</pre>
+        <button
+          className="text-[11px] text-emerald-400 hover:underline mt-0.5"
+          onClick={() => setExpanded(true)}
+        >
+          show full output ({lines.length} lines)
+        </button>
+        {item.isError && <span className="text-red-400 text-[10px] ml-2">· error</span>}
+      </div>
+    );
+  }
+  return (
+    <div className="font-mono text-xs" data-testid="msg-tool-result">
+      <Suspense fallback={<pre className="text-zinc-400 whitespace-pre-wrap p-2 bg-bg border border-border rounded">{item.output}</pre>}>
+        <CommandTerminal output={item.output} />
+      </Suspense>
+      {item.isError && <div className="text-red-400 text-[10px] mt-1">tool error</div>}
     </div>
   );
 }
@@ -146,16 +187,7 @@ function ItemView({ item }: { item: ChatItem }) {
       );
     }
     case "tool_result":
-      return (
-        <div className="font-mono text-xs" data-testid="msg-tool-result">
-          {item.output ? (
-            <Suspense fallback={<pre className="text-zinc-400 whitespace-pre-wrap p-2 bg-bg border border-border rounded">{item.output}</pre>}>
-              <CommandTerminal output={item.output} />
-            </Suspense>
-          ) : <div className="text-muted text-[11px]">(no output)</div>}
-          {item.isError && <div className="text-red-400 text-[10px] mt-1">tool error</div>}
-        </div>
-      );
+      return <ToolResultView item={item} />;
     case "system":
       return <div className="text-xs text-muted">{item.text}</div>;
     default:
