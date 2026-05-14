@@ -43,11 +43,13 @@
 
 按这套目标我们最终造了**三种独立后端**,跑在不同端口上,可同时存在用于体验对比:
 
-| 端口 | 模式 | 文件 |
-|---|---|---|
-| 9896 | print | `server/session.ts` |
-| 9897 | channel | `server/channel-session.ts` |
-| 9898 | oneshot | `server/oneshot-session.ts` |
+| 端口 | 模式 | 文件 | claude 启动 |
+|---|---|---|---|
+| 9896 | print | `server/session.ts` | `claude --print --input-format stream-json --output-format stream-json` 长进程,stdin 喂 NDJSON |
+| 9897 | channel | `server/channel-session.ts` | `claude`(交互模式)跑在 tmux,加 `--dangerously-load-development-channels` |
+| 9898 | oneshot | `server/oneshot-session.ts` | `claude --print --output-format stream-json "<prompt>"` 每个 turn fork 一次,exit 后归零 |
+
+**A 和 C 都用 `--print`,但进程管理完全不同**:A 是单一长期进程,跨 turn 通过 stdin NDJSON 流送消息;C 是每个 user turn fork 一次新进程,prompt 作为 argv 位置参数,跑完即退,下一个 turn 用 `--resume` 重新加载会话。详见第 5 节"与方式 A 的关键区别"。
 
 ---
 
