@@ -35,7 +35,7 @@ const ONESHOT_SYSTEM_PROMPT = `You are running inside claude-rc (oneshot mode). 
 
 ## Reply through the \`mcp__claude-rc-channel__reply\` tool
 
-EVERY user-visible answer goes through that tool. Plain text outside it still appears in the UI as fallback prose, but the tool is the proper channel and lets you emit rich generative UI.
+EVERY user-visible answer goes through that tool. The tool lets you emit either plain markdown text OR rich generative UI cards.
 
 Two ways to call it:
 - \`reply({text: "markdown..."})\` — plain text answer.
@@ -270,11 +270,13 @@ export class OneshotSession {
       const it = t.items[i];
       if (it.kind !== "agent" || !it.streaming) continue;
       it.streaming = false;
-      const split = extractUiBlocks(it.text);
+      const raw = (it as any)._rawText ?? it.text;
+      const split = extractUiBlocks(raw);
       if (split) {
         // Replace the agent item's text with the prose-only portion
         // (might be empty), and splice in a `blocks` ChatItem right after.
         it.text = split.before;
+        delete (it as any)._rawText;
         this.broadcast({ type: "item_updated", threadId: t.summary.id, item: it });
         const blocksItem: ChatItem = {
           kind: "blocks",
@@ -297,6 +299,9 @@ export class OneshotSession {
           this.broadcast({ type: "item_appended", threadId: t.summary.id, item: afterItem });
         }
       } else {
+        // No blocks — final text == raw.
+        it.text = raw;
+        delete (it as any)._rawText;
         this.broadcast({ type: "item_updated", threadId: t.summary.id, item: it });
       }
     }
@@ -389,7 +394,12 @@ export class OneshotSession {
           for (let i = t.items.length - 1; i >= 0; i--) {
             const it = t.items[i];
             if (it.kind === "agent" && it.streaming) {
-              it.text += dtxt;
+              // Keep the full raw text in _rawText for end-of-stream
+              // extraction; show a clean version (truncating any code-fence
+              // body that might contain blocks JSON) as the live text.
+              const raw = ((it as any)._rawText ?? "") + dtxt;
+              (it as any)._rawText = raw;
+              it.text = displayDuringStream(raw);
               this.broadcast({ type: "item_updated", threadId: t.summary.id, item: it });
               return;
             }
@@ -538,21 +548,51 @@ function transcriptPath(sessionId: string, cwd: string): string {
  * { before, blocks, after }. Returns null if no parseable ui block found.
  * Only the first ```ui block is processed — multi-block replies are rare.
  */
+/**
+ * During streaming, replace any in-progress fenced code block (which is
+ * likely the model's blocks JSON) with a small placeholder so the user
+ * doesn't watch raw JSON scroll past. Once the closing fence arrives,
+ * the bridge extracts blocks at watchExit and shows real cards.
+ */
+function displayDuringStream(raw: string): string {
+  const fenceOpen = /```[a-zA-Z]*\s*\n/g;
+  const m = fenceOpen.exec(raw);
+  if (!m) return raw;
+  const fenceStart = m.index + m[0].length;
+  // Look for closing fence after the opening.
+  const closeRe = /\n```/g;
+  closeRe.lastIndex = fenceStart;
+  const close = closeRe.exec(raw);
+  if (close) {
+    // Block already complete in this snapshot — full extraction will
+    // happen at watchExit. Show prose around it for now.
+    return raw.slice(0, m.index).trimEnd() +
+      "\n\n_🎴 rendering cards…_\n\n" +
+      raw.slice(close.index + close[0].length).trimStart();
+  }
+  // Block still open — hide rest, show spinner.
+  return raw.slice(0, m.index).trimEnd() + "\n\n_🎴 rendering cards…_";
+}
+
 function extractUiBlocks(text: string): { before: string; blocks: Block[]; after: string } | null {
-  const re = /```ui\s*\n([\s\S]*?)\n```/;
-  const m = re.exec(text);
-  if (!m) return null;
-  let parsed: any;
-  try { parsed = JSON.parse(m[1]); }
-  catch { return null; }
-  // Be ultra-tolerant: find any array-of-objects-with-`type` anywhere in the
-  // parsed structure (claude tends to invent wrappers like `components`,
-  // `cards`, `blocks`, `items`). Also accept a single object with `type`.
-  const blocks = harvestBlocks(parsed);
-  if (!blocks.length) return null;
-  const before = text.slice(0, m.index).trim();
-  const after = text.slice(m.index + m[0].length).trim();
-  return { before, blocks, after };
+  // Walk every fenced code block in the message — claude doesn't always
+  // honor the `ui` info string, sometimes emits ```json or just ``` with no
+  // info. First match whose body parses as JSON AND contains recognized
+  // block types wins.
+  const re = /```([a-zA-Z]*)\s*\n([\s\S]*?)\n```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const body = m[2];
+    let parsed: any;
+    try { parsed = JSON.parse(body); }
+    catch { continue; }
+    const blocks = harvestBlocks(parsed);
+    if (!blocks.length) continue;
+    const before = text.slice(0, m.index).trim();
+    const after = text.slice(m.index + m[0].length).trim();
+    return { before, blocks, after };
+  }
+  return null;
 }
 
 /**
